@@ -1,313 +1,386 @@
-# Aeroponic Potatoes — Pemantauan Pertumbuhan Akar Kentang Aeroponik Berbasis Citra
+# Aeroponic Potatoes: Image-Based Root Growth Monitoring
 
-Pemantauan pertumbuhan **akar dan umbi kentang** pada sistem aeroponik menggunakan kamera
-di ruang akar, lalu mengukur **panjang akar (cm)** secara otomatis dengan *computer vision*
-(**YOLO11s** untuk deteksi dan **U-Net** untuk segmentasi).
+This project monitors **potato root and tuber growth** in an aeroponic system. A camera inside the root
+chamber takes pictures automatically, and computer vision estimates **root length in centimetres**:
+**YOLO11s** detects roots and **U-Net** segments them.
 
 <p align="center">
-  <img src="docs/images/timelapse_preview.gif" width="640" alt="Timelapse pertumbuhan akar kentang aeroponik"><br>
-  <sub>Timelapse ruang akar Kamera 2, Juli – September 2024 ·
-  <a href="docs/timelapse.mp4">video lengkap (MP4, 1280×720)</a></sub>
+  <img src="docs/images/timelapse_preview.gif" width="640" alt="Timelapse of aeroponic potato root growth"><br>
+  <sub>Root chamber timelapse, Camera 2, July – September 2024 ·
+  <a href="docs/timelapse.mp4">full video (MP4, 1280×720)</a></sub>
 </p>
 
 ---
 
-## Daftar Isi
+## Table of Contents
 
-- [Arsitektur Sistem](#arsitektur-sistem)
-- [Struktur Repositori](#struktur-repositori)
+- [System Architecture](#system-architecture)
+- [Repository Structure](#repository-structure)
 - [Dataset](#dataset)
-- [Metode](#metode)
-  - [1. Seleksi data](#1-seleksi-data-bersih)
-  - [2. Kalibrasi kamera](#2-kalibrasi-kamera--koreksi-distorsi)
-  - [3. Anotasi](#3-anotasi)
-  - [4. Deteksi akar dengan YOLO11s](#4-deteksi-akar-dengan-yolo11s)
-  - [5. Segmentasi akar dengan U-Net](#5-segmentasi-akar-dengan-u-net)
-  - [6. Pengukuran panjang akar](#6-pengukuran-panjang-akar)
-- [Hasil](#hasil)
-- [Cara Menjalankan](#cara-menjalankan)
-- [Catatan & Keterbatasan](#catatan--keterbatasan)
+- [Methods](#methods)
+  - [1. Frame selection](#1-frame-selection)
+  - [2. Camera calibration](#2-camera-calibration--undistortion)
+  - [3. Annotation](#3-annotation)
+  - [4. Root detection with YOLO11s](#4-root-detection-with-yolo11s)
+  - [5. Root segmentation with U-Net](#5-root-segmentation-with-u-net)
+  - [6. Root length measurement](#6-root-length-measurement)
+- [Results](#results)
+- [Getting Started](#getting-started)
+- [Notes & Limitations](#notes--limitations)
 
 ---
 
-## Arsitektur Sistem
+## System Architecture
 
-<p align="center">
-  <img src="docs/images/pipeline.png" alt="Arsitektur pipeline">
-</p>
+```mermaid
+flowchart TB
+    subgraph ACQ["1 · Acquisition"]
+        direction LR
+        CAM["📷 Camera 2<br/>aeroponic root chamber"]
+        RAW[("Raw images<br/>2560×1440 · every ~10 min<br/>7,361 frames")]
+        CAM --> RAW
+    end
 
-| Tahap | Masukan | Proses | Keluaran |
+    subgraph CAL["2 · Calibration"]
+        direction LR
+        CB["Checkerboard<br/>8×6 inner corners · 40 mm"]
+        K["Intrinsics + distortion<br/>scale 0.0511 cm/px"]
+        CB --> K
+    end
+
+    subgraph PRE["3 · Preprocessing & Annotation"]
+        direction LR
+        SEL["Frame selection<br/>1 frame / hour → 1,246"]
+        UND["Undistortion"]
+        ANN["Polygon annotation<br/>AnyLabeling · Umbi + Akar 1–7"]
+        YL["YOLO labels<br/>bbox .txt"]
+        MK["Segmentation masks<br/>PNG"]
+        SEL --> UND --> ANN
+        ANN --> YL
+        ANN --> MK
+    end
+
+    subgraph MOD["4 · Models"]
+        direction LR
+        YOLO["YOLO11s<br/>root detection"]
+        CROP["Root strips<br/>160×1440 per root"]
+        UNET["U-Net<br/>binary root segmentation"]
+        CROP --> UNET
+    end
+
+    subgraph MEAS["5 · Measurement"]
+        direction LR
+        BB["bbox height"]
+        CT["contour top–bottom<br/>skeleton / graph"]
+        LEN(["📏 Root length (cm)"])
+        BB --> LEN
+        CT --> LEN
+    end
+
+    RAW --> SEL
+    RAW -.-> TL["🎞️ Timelapse"]
+    K --> UND
+    K -. cm/px .-> LEN
+    YL --> YOLO --> BB
+    MK --> UNET
+    UND --> CROP
+    UNET --> CT
+
+    classDef acq fill:#e8f1fc,stroke:#3987e5,color:#1d3557
+    classDef pre fill:#e9f6ee,stroke:#3fae6a,color:#1b4332
+    classDef mod fill:#fdf3e3,stroke:#e8a33d,color:#5c3d00
+    classDef out fill:#fde8e8,stroke:#d64b4b,color:#6a040f
+    class CAM,RAW,CB,K,TL acq
+    class SEL,UND,ANN,YL,MK pre
+    class YOLO,CROP,UNET,BB,CT mod
+    class LEN out
+```
+
+| Stage | Input | Process | Output |
 |---|---|---|---|
-| Akuisisi | Kamera 2 di ruang akar | Perekaman otomatis tiap ±10 menit | Citra 2560×1440 JPG |
-| Seleksi data | Citra mentah | Ambil 1 frame pertama tiap jam | Data bersih |
-| Kalibrasi | Citra checkerboard | `cv2.calibrateCamera` + `undistort` | Matriks intrinsik, koef. distorsi, skala cm/px |
-| Anotasi | Data bersih | Poligon di AnyLabeling | JSON (poligon), YOLO txt (bbox), mask PNG |
-| Model | Citra + label | YOLO11s (deteksi), U-Net (segmentasi) | Bounding box / mask akar |
-| Pengukuran | Bbox / mask | Kontur, skeleton, konversi skala | Panjang akar (cm) |
+| Acquisition | Camera 2 in the root chamber | Automatic capture every ~10 min | 2560×1440 JPG images |
+| Frame selection | Raw images | Keep the first frame of every hour | Clean subset |
+| Calibration | Checkerboard images | `cv2.calibrateCamera` + `undistort` | Intrinsic matrix, distortion coefficients, cm/px scale |
+| Annotation | Clean subset | Polygons drawn in AnyLabeling | JSON (polygons), YOLO txt (bbox), PNG masks |
+| Models | Images + labels | YOLO11s (detection), U-Net (segmentation) | Root bounding boxes / masks |
+| Measurement | Bbox / mask | Contour, skeleton, scale conversion | Root length (cm) |
 
 ---
 
-## Struktur Repositori
+## Repository Structure
 
 ```
 aeroponic-potatoes/
 ├── README.md
 ├── requirements.txt
 ├── notebooks/
-│   ├── 01_data_cleaning.ipynb               # seleksi 1 frame/jam
-│   ├── 02_camera_calibration.ipynb          # kalibrasi checkerboard + undistort
-│   ├── 03_yolo_root_detection.ipynb         # training & inferensi YOLO11s + tinggi bbox (cm)
-│   ├── 04_unet_segmentation_training.ipynb  # arsitektur & training U-Net
-│   └── 05_unet_inference_root_length.ipynb  # prediksi mask + panjang akar (kontur/skeleton)
+│   ├── 01_data_cleaning.ipynb               # keep 1 frame per hour
+│   ├── 02_camera_calibration.ipynb          # checkerboard calibration + undistortion
+│   ├── 03_yolo_root_detection.ipynb         # YOLO11s training/inference + bbox height (cm)
+│   ├── 04_unet_segmentation_training.ipynb  # U-Net architecture & training
+│   └── 05_unet_inference_root_length.ipynb  # mask prediction + root length (contour/skeleton)
 ├── scripts/
-│   ├── select_hourly_frames.py              # versi skrip dari notebook 01
-│   ├── crop_root_strips.py                  # potong citra jadi strip 160×1440 per akar
-│   ├── json_to_mask.py                      # anotasi JSON → mask PNG
-│   └── make_readme_figures.py               # membuat semua gambar di docs/images
+│   ├── select_hourly_frames.py              # script version of notebook 01
+│   ├── crop_root_strips.py                  # crop an image into 160×1440 strips, one per root
+│   ├── json_to_mask.py                      # JSON annotations → PNG masks
+│   └── make_readme_figures.py               # regenerates every figure in docs/images
 └── docs/
-    ├── images/                              # gambar README
-    ├── root_label_map_camera2.pdf           # peta penomoran akar Kamera 2
-    ├── timelapse.mp4                        # timelapse (terkompresi)
+    ├── images/                              # README figures
+    ├── root_label_map_camera2.pdf           # root numbering map for Camera 2
+    ├── timelapse.mp4                        # timelapse (compressed)
     └── yolo_tutorial_link.txt
 ```
 
-Folder berikut **hanya ada di lokal** (di-`.gitignore`, total ±9 GB):
+The following folders **exist only locally**. They are listed in `.gitignore` (about 9 GB in total):
 
 ```
 dataset/
 └── 2024-07 | 2024-08 | 2024-09/
-    ├── raw/          # citra mentah (±10 menit sekali)
-    ├── clean/        # 1 citra per jam (+ JSON anotasi)
-    ├── labels_json/  # anotasi poligon AnyLabeling
-    └── labels_yolo/  # images/, labels/, classes.txt (format YOLO)
-tools/anylabeling/    # tool anotasi (clone AnyLabeling)
+    ├── raw/          # raw images (one every ~10 min)
+    ├── clean/        # one image per hour (+ JSON annotations)
+    ├── labels_json/  # AnyLabeling polygon annotations
+    └── labels_yolo/  # images/, labels/, classes.txt (YOLO format)
+tools/anylabeling/    # annotation tool (AnyLabeling clone)
 ```
 
 ---
 
 ## Dataset
 
-Citra diambil dari **Kamera 2** yang menghadap ruang akar sistem aeroponik (grayscale,
-resolusi **2560 × 1440**).
+All images come from **Camera 2**, which faces the root chamber of the aeroponic system.
+The images are grayscale at **2560 × 1440** resolution.
 
-| Bulan | Periode | Hari terekam | Citra mentah | Data bersih (1/jam) | Teranotasi |
+| Month | Period | Days recorded | Raw images | Clean (1/hour) | Annotated |
 |---|---|:---:|---:|---:|---:|
-| Juli 2024 | 26 – 31 Jul | 6 | 803 | 136 | 135 |
-| Agustus 2024 | 1 – 31 Agu | 31 | 4.393 | 743 | 743 |
-| September 2024 | 1 – 21 Sep | 17 | 2.165 | 367 | 366 |
-| **Total** | | **54** | **7.361** | **1.246** | **1.244** |
+| July 2024 | 26 – 31 Jul | 6 | 803 | 136 | 135 |
+| August 2024 | 1 – 31 Aug | 31 | 4,393 | 743 | 743 |
+| September 2024 | 1 – 21 Sep | 17 | 2,165 | 367 | 366 |
+| **Total** | | **54** | **7,361** | **1,246** | **1,244** |
 
 <p align="center">
-  <img src="docs/images/dataset_stats.png" alt="Statistik dataset">
+  <img src="docs/images/dataset_stats.png" alt="Dataset statistics">
 </p>
 
-### Perkembangan visual per bulan
+### Growth across months
 
-Kiri: siang (12:00), kanan: malam (00:00). Terlihat akar dan umbi yang makin banyak dari Juli ke September.
+Left: day (12:00). Right: night (00:00). Roots and tubers increase visibly from July to September.
 
 <p align="center">
-  <img src="docs/images/growth_by_month.jpg" width="900" alt="Perkembangan akar per bulan">
+  <img src="docs/images/growth_by_month.jpg" width="900" alt="Root growth per month">
 </p>
 
-### Kelas anotasi
+### Annotation classes
 
-Setiap citra dianotasi dengan **8 kelas**: 1 kelas umbi dan 7 akar yang dilacak secara konsisten
-(penomoran mengikuti peta akar di bawah).
+Each image is annotated with **8 classes**: one tuber class and seven individually tracked roots.
+The class names are in Indonesian: *Umbi* = tuber, *Akar* = root. Roots are numbered according to the
+map below.
 
-| ID | Kelas | Jumlah poligon | Keterangan |
+| ID | Class | Polygons | Description |
 |:---:|---|---:|---|
-| 0 | Akar 1 | 1.239 | akar yang dilacak (kiri → kanan) |
-| 1 | Akar 2 | 1.237 | |
-| 2 | Akar 3 | 1.229 | |
-| 3 | Akar 4 | 1.122 | |
-| 4 | Akar 5 | 1.108 | |
-| 5 | Akar 6 | 1.154 | |
-| 6 | Akar 7 | 1.043 | |
-| 7 | Umbi | 15.507 | seluruh umbi yang terlihat |
+| 0 | Akar 1 | 1,239 | tracked root #1 (left → right) |
+| 1 | Akar 2 | 1,237 | tracked root #2 |
+| 2 | Akar 3 | 1,229 | tracked root #3 |
+| 3 | Akar 4 | 1,122 | tracked root #4 |
+| 4 | Akar 5 | 1,108 | tracked root #5 |
+| 5 | Akar 6 | 1,154 | tracked root #6 |
+| 6 | Akar 7 | 1,043 | tracked root #7 |
+| 7 | Umbi | 15,507 | every visible tuber |
 
 <p align="center">
-  <img src="docs/images/root_label_map.jpg" width="900" alt="Peta penomoran akar Kamera 2"><br>
-  <sub>Peta penomoran akar Kamera 2 (<a href="docs/root_label_map_camera2.pdf">PDF</a>)</sub>
+  <img src="docs/images/root_label_map.jpg" width="900" alt="Root numbering map for Camera 2"><br>
+  <sub>Root numbering map for Camera 2 (<a href="docs/root_label_map_camera2.pdf">PDF</a>)</sub>
 </p>
 
 ---
 
-## Metode
+## Methods
 
-### 1. Seleksi data bersih
+### 1. Frame selection
 
-Kamera merekam ±6 citra per jam. Untuk mengurangi redundansi, diambil **frame pertama setiap jam**
-berdasarkan nama file `YYYY-MM-DD_HH-MM-SS.jpg`
+The camera captures about 6 images per hour. To reduce redundancy, only the **first frame of every hour**
+is kept, based on the file name `YYYY-MM-DD_HH-MM-SS.jpg`
 ([`notebooks/01_data_cleaning.ipynb`](notebooks/01_data_cleaning.ipynb),
 [`scripts/select_hourly_frames.py`](scripts/select_hourly_frames.py)).
-Hasilnya ±24 citra/hari, dari 7.361 menjadi 1.246 citra.
+This leaves about 24 images per day and reduces the dataset from 7,361 to 1,246 images.
 
-### 2. Kalibrasi kamera & koreksi distorsi
+### 2. Camera calibration & undistortion
 
-Lensa kamera bersudut lebar sehingga ada distorsi *barrel*. Kalibrasi memakai papan
-**checkerboard 8 × 6 sudut dalam** dengan ukuran kotak **40 mm**
+The camera has a wide-angle lens with noticeable *barrel* distortion. It was calibrated with a
+**checkerboard of 8 × 6 inner corners** and **40 mm** squares
 ([`notebooks/02_camera_calibration.ipynb`](notebooks/02_camera_calibration.ipynb)).
 
 <p align="center">
-  <img src="docs/images/camera_calibration.jpg" width="900" alt="Deteksi sudut checkerboard">
+  <img src="docs/images/camera_calibration.jpg" width="900" alt="Checkerboard corner detection">
 </p>
 
-| Parameter | Nilai |
+| Parameter | Value |
 |---|---|
-| Pola checkerboard | 8 × 6 sudut dalam |
-| Ukuran kotak | 40 mm |
-| Algoritma | `findChessboardCorners` → `cornerSubPix` → `calibrateCamera` |
-| Koreksi | `getOptimalNewCameraMatrix` (α = 1) + `undistort`, crop ROI |
-| **Skala hasil kalibrasi** | **0,0511 cm/piksel** (±19,6 px/cm) |
-| Output | `camera_calibration_parameters.npz`, `scale.txt` |
+| Checkerboard pattern | 8 × 6 inner corners |
+| Square size | 40 mm |
+| Algorithm | `findChessboardCorners` → `cornerSubPix` → `calibrateCamera` |
+| Correction | `getOptimalNewCameraMatrix` (α = 1) + `undistort`, ROI crop |
+| **Calibrated scale** | **0.0511 cm/pixel** (~19.6 px/cm) |
+| Outputs | `camera_calibration_parameters.npz`, `scale.txt` |
 
-### 3. Anotasi
+### 3. Annotation
 
-Anotasi poligon dilakukan dengan [AnyLabeling](https://github.com/vietanhdev/anylabeling)
-lalu dikonversi ke dua format: **bounding box YOLO** untuk deteksi dan **mask PNG** untuk segmentasi
-([`scripts/json_to_mask.py`](scripts/json_to_mask.py); umbi = 128, akar = 255).
+Polygons were drawn in [AnyLabeling](https://github.com/vietanhdev/anylabeling) and then converted
+into two formats: **YOLO bounding boxes** for detection and **PNG masks** for segmentation
+([`scripts/json_to_mask.py`](scripts/json_to_mask.py); tuber = 128, root = 255).
 
 <p align="center">
-  <img src="docs/images/annotation_formats.jpg" alt="Format anotasi: poligon, YOLO, mask">
+  <img src="docs/images/annotation_formats.jpg" alt="Annotation formats: polygon, YOLO, mask">
 </p>
 
-### 4. Deteksi akar dengan YOLO11s
+### 4. Root detection with YOLO11s
 
-Model **YOLO11s** (Ultralytics) dilatih untuk mendeteksi akar (kelas tunggal `Akar Kentang`)
-pada citra yang sudah dikoreksi distorsi, lalu **tinggi bounding box × skala kalibrasi** dipakai
-sebagai estimasi panjang akar
+An Ultralytics **YOLO11s** model was trained to detect roots as a single class (`Akar Kentang`,
+"potato root") on undistorted images. Root length is then estimated as
+**bounding-box height × calibration scale**
 ([`notebooks/03_yolo_root_detection.ipynb`](notebooks/03_yolo_root_detection.ipynb)).
 
-| Hyperparameter | Nilai |
+| Hyperparameter | Value |
 |---|---|
-| Model awal | `yolo11s.pt` (9,4 juta parameter, 21,3 GFLOPs) |
-| Dataset | 200 citra → 180 train / 20 validasi (90:10) |
-| Epoch | 60 |
-| Ukuran input | 640 |
-| Batch | 16 |
+| Pretrained weights | `yolo11s.pt` (9.4 M parameters, 21.3 GFLOPs) |
+| Dataset | 200 images → 180 train / 20 validation (90:10) |
+| Epochs | 60 |
+| Image size | 640 |
+| Batch size | 16 |
 | Hardware | Google Colab, NVIDIA Tesla T4 |
-| Waktu training | ±4,7 menit (0,078 jam) |
+| Training time | ~4.7 min (0.078 h) |
 
-### 5. Segmentasi akar dengan U-Net
+### 5. Root segmentation with U-Net
 
-U-Net klasik (Keras/TensorFlow) untuk segmentasi biner akar
+A classic U-Net (Keras/TensorFlow) performs binary root segmentation
 ([`notebooks/04_unet_segmentation_training.ipynb`](notebooks/04_unet_segmentation_training.ipynb)).
 
-| Komponen | Detail |
+```mermaid
+flowchart LR
+    IN["Input<br/>grayscale"] --> E1["64"] --> E2["128"] --> E3["256"] --> E4["512<br/>+Dropout"]
+    E4 --> BN["1024<br/>bottleneck<br/>+Dropout"]
+    BN --> D4["512"] --> D3["256"] --> D2["128"] --> D1["64"] --> OUT["1×1 conv<br/>sigmoid"]
+    E4 -. skip .-> D4
+    E3 -. skip .-> D3
+    E2 -. skip .-> D2
+    E1 -. skip .-> D1
+```
+
+| Component | Details |
 |---|---|
-| Input | grayscale, dinormalisasi 0–1 |
-| Encoder | 4 blok Conv3×3 ×2 (64 → 128 → 256 → 512) + MaxPool 2×2, Dropout 0,5 di blok 4 |
-| Bottleneck | Conv3×3 ×2, 1024 filter, Dropout 0,5 |
+| Input | grayscale, normalised to 0–1 |
+| Encoder | 4 blocks of 2× Conv3×3 (64 → 128 → 256 → 512) + MaxPool 2×2, Dropout 0.5 in block 4 |
+| Bottleneck | 2× Conv3×3 with 1024 filters, Dropout 0.5 |
 | Decoder | UpSampling 2×2 + Conv2×2 + skip connection, 512 → 256 → 128 → 64 |
-| Output | Conv1×1, sigmoid (1 kanal) |
-| Parameter | **31.030.593** (118 MB) |
-| Loss / optimizer | binary cross-entropy / Adam |
+| Output | Conv1×1, sigmoid (1 channel) |
+| Parameters | **31,030,593** (118 MB) |
+| Loss / optimiser | binary cross-entropy / Adam |
 
-Karena training pada resolusi penuh **2560×1440** kehabisan memori GPU (Colab T4, *OOM* ±3,8 GB
-per tensor aktivasi), citra dipotong menjadi **strip vertikal 160 × 1440 piksel per akar**
-([`scripts/crop_root_strips.py`](scripts/crop_root_strips.py)) sebelum dimasukkan ke model.
+Training at the full **2560×1440** resolution ran out of GPU memory on a Colab T4 (one activation tensor
+alone needed ~3.8 GB). The images are therefore cropped into **vertical 160 × 1440 px strips, one per root**,
+before they go into the model ([`scripts/crop_root_strips.py`](scripts/crop_root_strips.py)).
 
-### 6. Pengukuran panjang akar
+### 6. Root length measurement
 
-Dari mask prediksi U-Net diuji tiga pendekatan
+Three approaches were tested on the U-Net masks
 ([`notebooks/05_unet_inference_root_length.ipynb`](notebooks/05_unet_inference_root_length.ipynb)):
 
-| Pendekatan | Cara kerja | Status |
+| Approach | How it works | Status |
 |---|---|---|
-| Skeleton (piksel) | `skeletonize` → jumlah piksel skeleton ÷ px/cm | eksperimen |
-| Skeleton + graph (`skan`) | analisis cabang: total panjang, cabang terpanjang | eksperimen |
-| **Kontur vertikal** | kontur terbesar yang memotong pusat strip (x = 75–85) → jarak titik teratas–terbawah ÷ px/cm | **dipakai** |
+| Skeleton (pixel count) | `skeletonize` → number of skeleton pixels ÷ px/cm | experimental |
+| Skeleton + graph (`skan`) | branch analysis: total length, longest branch | experimental |
+| **Vertical contour** | take the largest contour crossing the strip centre (x = 75–85), then measure from its topmost to its bottommost point ÷ px/cm | **used** |
 
-Faktor skala px/cm disesuaikan dengan kedalaman posisi akar terhadap kamera:
+The px/cm factor depends on how far the root is from the camera:
 
-| Posisi | a3 | a4 | a5 | a6 |
+| Position | a3 | a4 | a5 | a6 |
 |---|---:|---:|---:|---:|
-| px/cm | 29 | 18 | 13,5 | 11,5 |
+| px/cm | 29 | 18 | 13.5 | 11.5 |
 
 ---
 
-## Hasil
+## Results
 
-### Deteksi YOLO11s
+### YOLO11s detection
 
-| Metrik (validasi, 20 citra) | Nilai |
+| Metric (validation, 20 images) | Value |
 |---|---:|
-| Precision | **0,997** |
-| Recall | **1,000** |
-| mAP@50 | **0,995** |
-| mAP@50-95 | **0,837** |
-| Kecepatan inferensi (T4) | 2,7 ms/citra |
+| Precision | **0.997** |
+| Recall | **1.000** |
+| mAP@50 | **0.995** |
+| mAP@50-95 | **0.837** |
+| Inference speed (T4) | 2.7 ms/image |
 
 <p align="center">
-  <img src="docs/images/yolo_training_curves.png" alt="Kurva training YOLO11s">
+  <img src="docs/images/yolo_training_curves.png" alt="YOLO11s training curves">
 </p>
 
-Metrik validasi sempat tidak stabil pada epoch 9–13 dan 24–26, lalu konvergen setelah epoch ±27
-(mAP@50 ≈ 0,995). Log per-epoch tersedia di [`docs/images/yolo_training_log.csv`](docs/images/yolo_training_log.csv).
+Validation metrics were unstable around epochs 9–13 and 24–26. After about epoch 27 they
+converged (mAP@50 ≈ 0.995). The per-epoch log is in
+[`docs/images/yolo_training_log.csv`](docs/images/yolo_training_log.csv).
 
-**Contoh prediksi** — kiri: deteksi + *confidence*, kanan: estimasi panjang akar (tinggi bbox × 0,0511 cm/px):
+**Example predictions.** Left: detection with confidence. Right: estimated root length (bbox height × 0.0511 cm/px).
 
 <p align="center">
-  <img src="docs/images/yolo_predictions.jpg" alt="Contoh prediksi YOLO dan estimasi panjang akar">
+  <img src="docs/images/yolo_predictions.jpg" alt="YOLO predictions and root length estimates">
 </p>
 
-| Contoh | Confidence | Estimasi panjang |
+| Example | Confidence | Estimated length |
 |---|---:|---:|
-| 1 | 0,83 | 21,68 cm |
-| 2 | 0,84 | 24,33 cm |
-| 3 | 0,71 | 9,15 cm |
+| 1 | 0.83 | 21.68 cm |
+| 2 | 0.84 | 24.33 cm |
+| 3 | 0.71 | 9.15 cm |
 
-### Segmentasi U-Net & pengukuran
+### U-Net segmentation & measurement
 
 <p align="center">
-  <img src="docs/images/unet_inference.png" width="760" alt="Hasil inferensi U-Net dan skeletonisasi">
+  <img src="docs/images/unet_inference.png" width="760" alt="U-Net inference and skeletonisation">
 </p>
 
-| Citra uji | Metode | px/cm | Hasil |
+| Test image | Method | px/cm | Result |
 |---|---|---:|---|
-| `crop_10` | kontur vertikal (final) | 18 | 158 px → **8,78 cm** |
-| `crop_5` | kontur (centroid x = 70–90) | 30,8 | 203 px → **6,59 cm** |
-| `koreksi_302` | kontur terbesar | 18,5 | 373 px → **20,16 cm** |
-| `koreksi_302` | skeleton + `skan` | 14 | 24 cabang, total 117,51 cm, cabang terpanjang **16,20 cm** |
+| `crop_10` | vertical contour (final) | 18 | 158 px → **8.78 cm** |
+| `crop_5` | contour (centroid x = 70–90) | 30.8 | 203 px → **6.59 cm** |
+| `koreksi_302` | largest contour | 18.5 | 373 px → **20.16 cm** |
+| `koreksi_302` | skeleton + `skan` | 14 | 24 branches, 117.51 cm total, longest branch **16.20 cm** |
 
 ---
 
-## Cara Menjalankan
+## Getting Started
 
 ```bash
 git clone git@github.com:izmaherdian/aeroponic-potatoes.git
 cd aeroponic-potatoes
 pip install -r requirements.txt
 
-# 1. seleksi 1 frame/jam
+# 1. keep one frame per hour
 python scripts/select_hourly_frames.py dataset/2024-08/raw dataset/2024-08/clean
 
-# 2. konversi anotasi ke mask PNG
+# 2. convert annotations into PNG masks
 python scripts/json_to_mask.py dataset/2024-08/labels_json -o masks
 
-# 3. potong citra (sudah di-undistort) menjadi strip per akar
+# 3. crop an undistorted image into one strip per root
 python scripts/crop_root_strips.py koreksi_151.jpg -o crops --prefix crop15
 
-# 4. buat ulang gambar README (butuh folder dataset/ lokal)
+# 4. regenerate the README figures (requires the local dataset/ folder)
 python scripts/make_readme_figures.py
 ```
 
-Notebook `02`–`05` dijalankan di **Google Colab** (GPU T4) dengan data di Google Drive;
-sesuaikan path di sel awal tiap notebook.
+Notebooks `02`–`05` were run on **Google Colab** (T4 GPU) with the data stored on Google Drive.
+Update the paths in the first cells of each notebook before running them.
 
 ---
 
-## Catatan & Keterbatasan
+## Notes & Limitations
 
-- **Dataset tidak disertakan** di repositori karena ukurannya ±9 GB.
-- Jam pada *overlay* kamera (OSD) sempat ter-*reset* di bulan September (tertulis 2011);
-  waktu yang valid adalah **nama file**.
-- Validasi YOLO hanya 20 citra dengan 1 kelas, sehingga metrik sangat tinggi dan perlu diuji pada
-  set yang lebih besar dan per-kelas (Akar 1–7).
-- Skala cm/px dari kalibrasi hanya akurat pada bidang checkerboard; akar pada kedalaman berbeda
-  memerlukan faktor skala sendiri (a3–a6).
-- Training U-Net resolusi penuh tidak muat di memori GPU Colab; digunakan strip per akar.
+- **The dataset is not included** in this repository because it is about 9 GB.
+- The camera's on-screen clock (OSD) reset in September and shows the year 2011. Use the
+  **file name** as the true timestamp.
+- The YOLO validation set has only 20 images and a single class, so its metrics are very high. The model
+  should be evaluated on a larger set and per class (Akar 1–7).
+- The calibrated cm/px scale is only accurate on the checkerboard plane. Roots at other depths need their
+  own scale factor (a3–a6).
+- Full-resolution U-Net training does not fit in Colab GPU memory, so per-root strips are used instead.
 
 ---
 
-<sub>Proyek S2 Instrumentasi dan Kontrol — Institut Teknologi Bandung · Izma Alhazmi Herdian</sub>
+<sub>Master's project, Instrumentation and Control, Institut Teknologi Bandung · Izma Alhazmi Herdian</sub>

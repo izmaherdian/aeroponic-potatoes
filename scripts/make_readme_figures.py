@@ -19,13 +19,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET = os.path.join(ROOT, "dataset")
 OUT = os.path.join(ROOT, "docs", "images")
 MONTHS = ["2024-07", "2024-08", "2024-09"]
-MONTH_NAMES = {"2024-07": "Juli", "2024-08": "Agustus", "2024-09": "September"}
+MONTH_NAMES = {"2024-07": "July", "2024-08": "August", "2024-09": "September"}
 CLASSES = ["Umbi"] + [f"Akar {i}" for i in range(1, 8)]
 
 # Palet: 8 warna kategorikal (BGR untuk OpenCV)
@@ -80,79 +79,13 @@ def first(pattern):
     return sorted(glob.glob(os.path.join(DATASET, pattern)))[0]
 
 
-# ---------------------------------------------------------------- pipeline
-def fig_pipeline():
-    fig, ax = plt.subplots(figsize=(14, 6.2))
-    ax.set_xlim(0, 14)
-    ax.set_ylim(0, 6.2)
-    ax.axis("off")
-    ax.grid(False)
-
-    lanes = [
-        (5.0, "Akuisisi", "#3987e5"),
-        (3.1, "Pra-proses & Anotasi", "#3fae6a"),
-        (1.2, "Model & Pengukuran", "#e8a33d"),
-    ]
-    for y, name, col in lanes:
-        ax.add_patch(FancyBboxPatch((0.1, y - 0.75), 13.8, 1.5, boxstyle="round,pad=0.02,rounding_size=0.15",
-                                    fc=col, alpha=0.07, ec="none"))
-        ax.text(0.45, y, name.replace(" & ", " &\n"), color=col, fontsize=10, fontweight="bold",
-                va="center", ha="center", rotation=90)
-
-    def box(x, y, title, sub, col):
-        ax.add_patch(FancyBboxPatch((x - 1.15, y - 0.5), 2.3, 1.0, boxstyle="round,pad=0.02,rounding_size=0.12",
-                                    fc="white", ec=col, lw=2))
-        ax.text(x, y + 0.14, title, ha="center", va="center", fontsize=10.5, fontweight="bold", color="#222")
-        ax.text(x, y - 0.22, sub, ha="center", va="center", fontsize=8.5, color="#555")
-        return (x, y)
-
-    def arrow(p, q, rad=0.0):
-        ax.add_patch(FancyArrowPatch(p, q, arrowstyle="-|>", mutation_scale=16, lw=1.6, color="#666",
-                                     connectionstyle=f"arc3,rad={rad}"))
-
-    b, g, o = "#3987e5", "#3fae6a", "#e8a33d"
-    a1 = box(2.2, 5.0, "Kamera 2", "ruang akar aeroponik", b)
-    a2 = box(5.4, 5.0, "Citra mentah", "2560×1440, tiap ±10 menit", b)
-    a3 = box(8.6, 5.0, "Kalibrasi kamera", "checkerboard 8×6, 40 mm", b)
-    a4 = box(11.8, 5.0, "Timelapse", "Jul – Sep 2024", b)
-
-    p1 = box(2.2, 3.1, "Seleksi data", "1 frame per jam", g)
-    p2 = box(5.4, 3.1, "Undistort", "koreksi distorsi lensa", g)
-    p3 = box(8.6, 3.1, "Anotasi poligon", "AnyLabeling: Umbi, Akar 1–7", g)
-    p4 = box(11.8, 3.1, "Konversi label", "YOLO txt & mask PNG", g)
-
-    # baris bawah mengalir dari kanan ke kiri (snake layout)
-    m1 = box(11.8, 1.2, "YOLO11s / U-Net", "deteksi bbox / segmentasi strip", o)
-    m2 = box(8.6, 1.2, "Post-processing", "tinggi bbox / kontur / skeleton", o)
-    m3 = box(5.4, 1.2, "Konversi skala", "0,0511 cm/px (kalibrasi)", o)
-    m4 = box(2.2, 1.2, "Panjang akar (cm)", "per akar, per waktu", o)
-
-    arrow((a1[0] + 1.15, 5.0), (a2[0] - 1.15, 5.0))
-    arrow((a2[0] + 1.15, 5.0), (a3[0] - 1.15, 5.0))
-    arrow((a3[0] + 1.15, 5.0), (a4[0] - 1.15, 5.0))
-    arrow((a2[0] - 0.4, 4.5), (p1[0] + 0.4, 3.6))
-    arrow((a3[0] - 0.4, 4.5), (p2[0] + 0.4, 3.6))
-    arrow((p1[0] + 1.15, 3.1), (p2[0] - 1.15, 3.1))
-    arrow((p2[0] + 1.15, 3.1), (p3[0] - 1.15, 3.1))
-    arrow((p3[0] + 1.15, 3.1), (p4[0] - 1.15, 3.1))
-    arrow((p4[0], 2.6), (m1[0], 1.7))
-    arrow((m1[0] - 1.15, 1.2), (m2[0] + 1.15, 1.2))
-    arrow((m2[0] - 1.15, 1.2), (m3[0] + 1.15, 1.2))
-    arrow((m3[0] - 1.15, 1.2), (m4[0] + 1.15, 1.2))
-
-    fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "pipeline.png"), dpi=150, facecolor="white")
-    plt.close(fig)
-    print("saved docs/images/pipeline.png")
-
-
 # ---------------------------------------------------------------- growth
 def fig_growth():
     picks = [("2024-07", "2024-07-27"), ("2024-08", "2024-08-15"), ("2024-09", "2024-09-20")]
     rows = []
     for m, day in picks:
         row = []
-        for hh, tag in (("12", "siang"), ("00", "malam")):
+        for hh, tag in (("12", "day"), ("00", "night")):
             f = first(f"{m}/clean/{day}_{hh}-*.jpg")
             img = cv2.resize(cv2.imread(f), (960, 540), interpolation=cv2.INTER_AREA)
             img[0:44, 0:330] = 0
@@ -216,8 +149,8 @@ def fig_annotation():
                         1.1, col, 3, cv2.LINE_AA)
 
     tiles = []
-    for im, t in ((img, "a) Citra bersih"), (poly, "b) Anotasi poligon (JSON)"),
-                  (yolo, "c) Label YOLO (bbox)"), (mask, "d) Mask segmentasi (PNG)")):
+    for im, t in ((img, "a) Clean image"), (poly, "b) Polygon annotation (JSON)"),
+                  (yolo, "c) YOLO labels (bbox)"), (mask, "d) Segmentation mask (PNG)")):
         im = im.copy()
         im[0:120, 0:1150] = 0  # tutup timestamp OSD kamera
         put_label(im, t, (30, 85), 2.2)
@@ -260,30 +193,31 @@ def fig_dataset(stats):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4.8), gridspec_kw={"width_ratios": [1, 1.5]})
     x = np.arange(len(MONTHS))
     wbar = 0.26
-    series = [("raw", "Citra mentah", "#9aa5b1"), ("clean", "Data bersih (1/jam)", "#3987e5"),
-              ("labeled", "Teranotasi", "#e8a33d")]
+    series = [("raw", "Raw images", "#9aa5b1"), ("clean", "Clean (1/hour)", "#3987e5"),
+              ("labeled", "Annotated", "#e8a33d")]
     for i, (k, name, col) in enumerate(series):
         vals = [stats[m][k] for m in MONTHS]
         bars = ax1.bar(x + (i - 1) * wbar, vals, wbar, label=name, color=col)
         ax1.bar_label(bars, fontsize=8.5, padding=2)
     ax1.set_xticks(x, [MONTH_NAMES[m] for m in MONTHS])
-    ax1.set_ylabel("Jumlah citra")
-    ax1.set_title("Jumlah citra per bulan", loc="left", fontweight="bold")
+    ax1.set_ylabel("Number of images")
+    ax1.set_title("Images per month", loc="left", fontweight="bold")
     ax1.legend(frameon=False, fontsize=9)
     ax1.grid(axis="x", visible=False)
 
-    bottoms = np.zeros(len(CLASSES))
+    xc = np.arange(len(CLASSES))
+    wc = 0.27
     month_cols = ["#b7d3f5", "#3987e5", "#1d4f91"]
-    for m, col in zip(MONTHS, month_cols):
+    totals = np.zeros(len(CLASSES), int)
+    for i, (m, col) in enumerate(zip(MONTHS, month_cols)):
         vals = np.array([stats[m]["counts"].get(c, 0) for c in CLASSES])
-        ax2.bar(CLASSES, vals, bottom=bottoms, color=col, label=MONTH_NAMES[m], width=0.65)
-        bottoms += vals
-    for i, v in enumerate(bottoms):
-        ax2.text(i, v + 150, f"{int(v):,}".replace(",", "."), ha="center", fontsize=9)
+        totals += vals
+        ax2.bar(xc + (i - 1) * wc, vals, wc, color=col, label=MONTH_NAMES[m])
+    ax2.set_xticks(xc, [f"{c}\n(Σ {t:,})" for c, t in zip(CLASSES, totals)], fontsize=9.5)
     ax2.set_yscale("log")
-    ax2.set_ylim(500, 40000)
-    ax2.set_ylabel("Jumlah poligon (skala log)")
-    ax2.set_title("Jumlah instance anotasi per kelas", loc="left", fontweight="bold")
+    ax2.set_ylim(80, 30000)
+    ax2.set_ylabel("Number of polygons (log scale)")
+    ax2.set_title("Annotated instances per class", loc="left", fontweight="bold")
     ax2.legend(frameon=False, fontsize=9, ncol=3, loc="upper right")
     ax2.grid(axis="x", visible=False)
 
@@ -332,7 +266,7 @@ def fig_yolo_training(log):
         ax1.plot(ep, log[:, 1 + i], color=col, lw=2, label=name)
     ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Loss (train)")
-    ax1.set_title("Loss pelatihan YOLO11s", loc="left", fontweight="bold")
+    ax1.set_title("YOLO11s training loss", loc="left", fontweight="bold")
     ax1.legend(frameon=False)
     ax1.set_ylim(0, 3)
 
@@ -341,13 +275,13 @@ def fig_yolo_training(log):
         ax2.plot(ep, log[:, 4 + i], color=col, lw=2, label=name)
     best = int(np.argmax(log[:, 7]))
     ax2.scatter(ep[best], log[best, 7], color="#d64b4b", zorder=5)
-    ax2.annotate(f"terbaik: {log[best, 7]:.3f} (epoch {int(ep[best])})", (ep[best], log[best, 7]),
+    ax2.annotate(f"best: {log[best, 7]:.3f} (epoch {int(ep[best])})", (ep[best], log[best, 7]),
                  xytext=(-150, -45), textcoords="offset points", fontsize=9,
                  arrowprops=dict(arrowstyle="-", color="#888"))
     ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Skor (validasi)")
+    ax2.set_ylabel("Score (validation)")
     ax2.set_ylim(0, 1.05)
-    ax2.set_title("Metrik validasi", loc="left", fontweight="bold")
+    ax2.set_title("Validation metrics", loc="left", fontweight="bold")
     ax2.legend(frameon=False, loc="lower right", ncol=2)
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "yolo_training_curves.png"), dpi=150, facecolor="white")
@@ -387,7 +321,7 @@ def fig_unet():
     nb = os.path.join(ROOT, "notebooks", "05_unet_inference_root_length.ipynb")
     pred = crop_panels(notebook_images(nb, 3)[0], 2)
     skel = crop_panels(notebook_images(nb, 6)[0], 3)
-    titles = ["Strip input", "Prediksi U-Net", "Mask akar", "Skeleton", "Overlay"]
+    titles = ["Strip input", "U-Net prediction", "Root mask", "Skeleton", "Overlay"]
     panels = pred + skel
     H = 460
     fig, axes = plt.subplots(1, 5, figsize=(10, 5.2))
@@ -396,8 +330,8 @@ def fig_unet():
         ax.imshow(cv2.cvtColor(p, cv2.COLOR_BGR2RGB))
         ax.set_title(t, fontsize=11)
         ax.axis("off")
-    fig.text(0.21, 0.02, "Contoh 1 · segmentasi 1 akar", ha="center", fontsize=9.5, color="#555")
-    fig.text(0.70, 0.02, "Contoh 2 · analisis skeleton (24 cabang)", ha="center", fontsize=9.5, color="#555")
+    fig.text(0.21, 0.02, "Example 1 · single-root segmentation", ha="center", fontsize=9.5, color="#555")
+    fig.text(0.70, 0.02, "Example 2 · skeleton analysis (24 branches)", ha="center", fontsize=9.5, color="#555")
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     fig.savefig(os.path.join(OUT, "unet_inference.png"), dpi=150, facecolor="white")
     plt.close(fig)
@@ -406,7 +340,6 @@ def fig_unet():
 
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
-    fig_pipeline()
     fig_growth()
     fig_annotation()
     fig_label_map()
