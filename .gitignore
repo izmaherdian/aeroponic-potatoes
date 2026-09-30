@@ -1,0 +1,30 @@
+# Dataset citra (±9 GB) — disimpan lokal, tidak di-push
+dataset/
+data/
+
+# Tool anotasi pihak ketiga (clone AnyLabeling + venv)
+tools/
+
+# Video timelapse resolusi asli (versi terkompresi: docs/timelapse.mp4)
+docs/timelapse_original.mp4
+
+# Model & output
+*.pt
+*.keras
+*.h5
+*.npz
+runs/
+masks/
+crops/
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
